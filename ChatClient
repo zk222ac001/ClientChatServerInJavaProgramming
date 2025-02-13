@@ -1,0 +1,137 @@
+import java.io.*;
+import java.net.*;
+import java.util.Scanner;
+
+public class ChatClient {
+    private Socket socket;
+    private BufferedReader in;
+    private PrintWriter out;
+    private String nickname;
+    private boolean running = true;
+
+    public static void main(String[] args) {
+        new ChatClient().start("localhost", 1234);
+    }
+
+    public void start(String host, int port) {
+        try {
+            socket = new Socket(host, port);
+            in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+            out = new PrintWriter(socket.getOutputStream(), true);
+
+            new Thread(this::receiveMessages).start();
+
+            Scanner scanner = new Scanner(System.in);
+            System.out.println("Available commands:\n" +
+                    "/join <nickname>\n" +
+                    "/message <message>\n" +
+                    "/leave\n" +
+                    "/private <nickname> <message>\n" +
+                    "/getlist\n" +
+                    "/privatesublist \"nick1,nick2\" <message>\n" +
+                    "/help\n" +
+                    "/stopserver\n" +
+                    "/addword <word>\n" +
+                    "/removeword <word>\n" +
+                    "/listwords");
+
+            while (running) {
+                String input = scanner.nextLine().trim();
+                if (input.startsWith("/")) {
+                    handleCommand(input);
+                } else {
+                    System.out.println("Invalid command. Type /help for available commands");
+                }
+            }
+        } catch (IOException e) {
+            System.out.println("Connection error: " + e.getMessage());
+        } finally {
+            closeResources();
+        }
+    }
+
+    private void handleCommand(String input) {
+        String[] parts = input.split(" ", 2);
+        String command = parts[0].substring(1);
+        String args = parts.length > 1 ? parts[1] : "";
+
+        try {
+            switch (command.toLowerCase()) {
+                case "join":
+                    sendCommand("#JOIN", args);
+                    break;
+                case "message":
+                    sendCommand("#MESSAGE", args);
+                    break;
+                case "leave":
+                    sendCommand("#LEAVE", "");
+                    running = false;
+                    break;
+                case "private":
+                    sendCommand("#PRIVATE", args);
+                    break;
+                case "getlist":
+                    sendCommand("#GETLIST", "");
+                    break;
+                case "privatesublist":
+                    sendCommand("#PRIVATESUBLIST", args);
+                    break;
+                case "help":
+                    sendCommand("#HELP", "");
+                    break;
+                case "stopserver":
+                    sendCommand("#STOPSERVER", "");
+                    break;
+                case "addword":
+                    sendCommand("#ADDWORD", args);
+                    break;
+                case "removeword":
+                    sendCommand("#REMOVEWORD", args);
+                    break;
+                case "listwords":
+                    sendCommand("#LISTWORDS", "");
+                    break;
+                default:
+                    System.out.println("Unknown command. Type /help for available commands");
+            }
+        } catch (Exception e) {
+            System.out.println("Error processing command: " + e.getMessage());
+        }
+    }
+
+    private void sendCommand(String command, String args) {
+        out.println(command + (args.isEmpty() ? "" : " " + args));
+    }
+
+    private void receiveMessages() {
+        try {
+            String message;
+            while ((message = in.readLine()) != null) {
+                System.out.println(message);
+
+                // Check for server shutdown message
+                if (message.contains("Server shutting down")) {
+                    running = false;
+                    break;
+                }
+            }
+        } catch (IOException e) {
+            if (running) {
+                System.out.println("Disconnected from server");
+            }
+        } finally {
+            closeResources();
+        }
+    }
+
+    private void closeResources() {
+        try {
+            running = false;
+            if (in != null) in.close();
+            if (out != null) out.close();
+            if (socket != null) socket.close();
+        } catch (IOException e) {
+            System.out.println("Error closing resources: " + e.getMessage());
+        }
+    }
+}
