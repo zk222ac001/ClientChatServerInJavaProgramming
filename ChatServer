@@ -1,0 +1,381 @@
+import java.io.*;
+import java.net.*;
+import java.util.*;
+import java.util.concurrent.*;
+
+public class ChatServer {
+
+    private ServerSocket serverSocket;
+    private CopyOnWriteArrayList<ClientHandler> clients = new CopyOnWriteArrayList<>();
+    private Set<String> clientNames = ConcurrentHashMap.newKeySet();
+    private Set<String> bannedClients = ConcurrentHashMap.newKeySet();
+    private Set<String> bannedWords = ConcurrentHashMap.newKeySet();
+    private Map<String, Integer> violationCounts = new ConcurrentHashMap<>();
+
+    public void start(int port) throws IOException {
+        serverSocket = new ServerSocket(port);
+        System.out.println("Server started on port " + port);
+        while (true) {
+            Socket clientSocket = serverSocket.accept();
+            ClientHandler clientHandler = new ClientHandler(clientSocket, this);
+            new Thread(clientHandler).start();
+        }
+    }
+
+    public void addClient(ClientHandler client) {
+        clients.add(client);
+    }
+
+    public void removeClient(ClientHandler client) {
+        clients.remove(client);
+        clientNames.remove(client.clientName);
+    }
+
+    public void broadcast(String message, ClientHandler exclude) {
+        for (ClientHandler client : clients) {
+            if (client != exclude) {
+                client.sendMessage(message);
+            }
+        }
+    }
+
+    public void broadcast(String message) {
+        for (ClientHandler client : clients) {
+            client.sendMessage(message);
+        }
+    }
+
+    public String sanitizeMessage(String message, String clientName) {
+        String[] words = message.split("\\s+");
+        int count = 0;
+        for (int i = 0; i < words.length; i++) {
+            if (bannedWords.contains(words[i].toLowerCase())) {
+                words[i] = "**";
+                count++;
+            }
+        }
+        if (count > 0) {
+            violationCounts.put(clientName, violationCounts.getOrDefault(clientName, 0) + count);
+        }
+        return String.join(" ", words);
+    }
+
+    public void addBannedWord(String word) {
+        bannedWords.add(word.toLowerCase());
+    }
+
+    public void removeBannedWord(String word) {
+        bannedWords.remove(word.toLowerCase());
+    }
+
+    public String listBannedWords() {
+        return String.join(", ", bannedWords);
+    }
+
+    public void banClient(String clientName) {
+        bannedClients.add(clientName);
+        clientNames.remove(clientName);
+        clients.removeIf(client -> {
+            if (client.clientName.equals(clientName)) {
+                client.closeConnection();
+                return true;
+            }
+            return false;
+        });
+        broadcast(clientName + " has been banned for sending too many inappropriate messages.");
+    }
+
+    public static void main(String[] args) {
+        ChatServer server = new ChatServer();
+        try {
+            server.start(1234);
+        } catch (IOException e) {
+            System.out.println("Server error: " + e.getMessage());
+        }
+    }
+
+    private static class ClientHandler implements Runnable {
+        private Socket socket;
+        private ChatServer server;
+        private String clientName;
+        private BufferedReader in;
+        private PrintWriter out;
+
+        public ClientHandler(Socket socket, ChatServer server) {
+            this.socket = socket;
+            this.server = server;
+        }
+
+        @Override
+        public void run() {
+            try {
+                in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+                out = new PrintWriter(socket.getOutputStream(), true);
+
+                String message;
+                while ((message = in.readLine()) != null) {
+                    if (message.startsWith("#")) {
+                        handleCommand(message);
+                    } else {
+                        sendMessage("ERROR Invalid command");
+                    }
+                }
+            } catch (IOException e) {
+                System.out.println("Error with client: " + e.getMessage());
+            } finally {
+                if (clientName != null) {
+                    server.clientNames.remove(clientName);
+                    server.removeClient(this);
+                    server.broadcast(clientName + " has left the chat.");
+                }
+                closeConnection();
+            }
+        }
+
+        private void handleCommand(String message) {
+            String[] parts = message.split(" ", 2);
+            String command = parts[0];
+            String args = parts.length > 1 ? parts[1] : "";
+
+            switch (command) {
+                case "#JOIN":
+                    handleJoin(args);
+                    break;
+                case "#MESSAGE":
+                    handleMessage(args);
+                    break;
+                case "#LEAVE":
+                    handleLeave();
+                    break;
+                case "#PRIVATE":
+                    handlePrivate(args);
+                    break;
+                case "#GETLIST":
+                    handleGetList();
+                    break;
+                case "#PRIVATESUBLIST":
+                    handlePrivateSublist(args);
+                    break;
+                case "#HELP":
+                    handleHelp();
+                    break;
+                case "#STOPSERVER":
+                    handleStopServer();
+                    break;
+                case "#ADDWORD":
+                    handleAddWord(args);
+                    break;
+                case "#REMOVEWORD":
+                    handleRemoveWord(args);
+                    break;
+                case "#LISTWORDS":
+                    handleListWords();
+                    break;
+                default:
+                    sendMessage("ERROR Unknown command");
+            }
+        }
+
+        private void handleJoin(String args) {
+            if (clientName != null) {
+                sendMessage("ERROR You have already joined");
+                return;
+            }
+            String[] joinArgs = args.split(" ", 2);
+            if (joinArgs.length < 1) {
+                sendMessage("ERROR Missing nickname");
+                return;
+            }
+            String nickname = joinArgs[0];
+            if (server.bannedClients.contains(nickname)) {
+                sendMessage("ERROR You are banned");
+                closeConnection();
+                return;
+            }
+            if (!server.clientNames.add(nickname)) {
+                sendMessage("ERROR Nickname already in use");
+                closeConnection();
+                return;
+            }
+            clientName = nickname;
+            server.addClient(this);
+            server.broadcast(clientName + " has joined the chat.");
+        }
+
+        private void handleMessage(String args) {
+            if (clientName == null) {
+                sendMessage("ERROR You must join first");
+                return;
+            }
+            if (args.isEmpty()) {
+                sendMessage("ERROR Missing message");
+                return;
+            }
+            String sanitized = server.sanitizeMessage(args, clientName);
+            int violations = server.violationCounts.getOrDefault(clientName, 0);
+            if (violations >= 3) {
+                server.banClient(clientName);
+                closeConnection();
+                return;
+            }
+            server.broadcast(clientName + ": " + sanitized, this);
+        }
+
+        private void handleLeave() {
+            if (clientName == null) return;
+            server.clientNames.remove(clientName);
+            server.removeClient(this);
+            server.broadcast(clientName + " has left the chat.");
+            closeConnection();
+        }
+
+        private void handlePrivate(String args) {
+            if (clientName == null) {
+                sendMessage("ERROR You must join first");
+                return;
+            }
+            String[] privateArgs = args.split(" ", 2);
+            if (privateArgs.length < 2) {
+                sendMessage("ERROR Missing recipient or message");
+                return;
+            }
+            String recipient = privateArgs[0];
+            String content = privateArgs[1];
+            String sanitized = server.sanitizeMessage(content, clientName);
+            int violations = server.violationCounts.getOrDefault(clientName, 0);
+            if (violations >= 3) {
+                server.banClient(clientName);
+                closeConnection();
+                return;
+            }
+            boolean found = false;
+            for (ClientHandler client : server.clients) {
+                if (client.clientName.equals(recipient)) {
+                    client.sendMessage("[Private from " + clientName + "] " + sanitized);
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                sendMessage("ERROR Recipient not found");
+            }
+        }
+
+        private void handleGetList() {
+            sendMessage("Active clients: " + String.join(", ", server.clientNames));
+        }
+
+        private void handlePrivateSublist(String args) {
+            if (clientName == null) {
+                sendMessage("ERROR You must join first");
+                return;
+            }
+            if (!args.startsWith("\"")) {
+                sendMessage("ERROR Invalid format");
+                return;
+            }
+            int endQuote = args.indexOf('"', 1);
+            if (endQuote == -1) {
+                sendMessage("ERROR Missing closing quote");
+                return;
+            }
+            String nicknameList = args.substring(1, endQuote);
+            String message = args.substring(endQuote + 1).trim();
+            if (message.isEmpty()) {
+                sendMessage("ERROR Missing message");
+                return;
+            }
+            String[] nicknames = nicknameList.split(",");
+            String sanitized = server.sanitizeMessage(message, clientName);
+            int violations = server.violationCounts.getOrDefault(clientName, 0);
+            if (violations >= 3) {
+                server.banClient(clientName);
+                closeConnection();
+                return;
+            }
+            List<String> notFound = new ArrayList<>();
+            for (String nickname : nicknames) {
+                nickname = nickname.trim();
+                boolean found = false;
+                for (ClientHandler client : server.clients) {
+                    if (client.clientName.equals(nickname)) {
+                        client.sendMessage("[Private from " + clientName + "] " + sanitized);
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    notFound.add(nickname);
+                }
+            }
+            if (!notFound.isEmpty()) {
+                sendMessage("ERROR Recipients not found: " + String.join(", ", notFound));
+            }
+        }
+
+        private void handleHelp() {
+            String help = "#JOIN <nickname> - Join chat\n" +
+                    "#MESSAGE <msg> - Send message\n" +
+                    "#LEAVE - Leave chat\n" +
+                    "#PRIVATE <nick> <msg> - Private message\n" +
+                    "#GETLIST - List clients\n" +
+                    "#PRIVATESUBLIST \"nick1,nick2\" <msg> - Private to multiple\n" +
+                    "#HELP - Show help\n" +
+                    "#STOPSERVER - Stop server\n" +
+                    "#ADDWORD <word> - Add banned word\n" +
+                    "#REMOVEWORD <word> - Remove banned word\n" +
+                    "#LISTWORDS - List banned words";
+            sendMessage(help);
+        }
+
+        private void handleStopServer() {
+            server.broadcast("Server shutting down...");
+            server.clients.forEach(ClientHandler::closeConnection);
+            try {
+                server.serverSocket.close();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+            System.exit(0);
+        }
+
+        private void handleAddWord(String args) {
+            if (args.isEmpty()) {
+                sendMessage("ERROR Missing word");
+                return;
+            }
+            server.addBannedWord(args);
+            sendMessage("Added banned word: " + args);
+        }
+
+        private void handleRemoveWord(String args) {
+            if (args.isEmpty()) {
+                sendMessage("ERROR Missing word");
+                return;
+            }
+            if (server.bannedWords.remove(args.toLowerCase())) {
+                sendMessage("Removed banned word: " + args);
+            } else {
+                sendMessage("Word not found: " + args);
+            }
+        }
+
+        private void handleListWords() {
+            sendMessage("Banned words: " + server.listBannedWords());
+        }
+
+        public synchronized void sendMessage(String message) {
+            out.println(message);
+        }
+
+        public void closeConnection() {
+            try {
+                if (in != null) in.close();
+                if (out != null) out.close();
+                if (socket != null) socket.close();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+    }
+}
