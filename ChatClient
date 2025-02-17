@@ -19,8 +19,9 @@ public class ChatClient {
             in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
             out = new PrintWriter(socket.getOutputStream(), true);
 
-            new Thread(this::receiveMessages).start();
-
+             new Thread(this::receiveMessages).start();
+            // alternative approach
+            //new Thread(() -> receiveMessages()).start();
             Scanner scanner = new Scanner(System.in);
             System.out.println("Available commands:\n" +
                     "/join <nickname>\n" +
